@@ -29,7 +29,7 @@ The light follows your local clock by default (**Now**). It blends between five 
 
 ## How it works
 
-It is a single `index.html` with no build step and no libraries, written in WebGL2.
+It is a single `index.html` with no build step, no libraries and no third-party requests, written in WebGL2.
 
 - **Geometry**: a signed-distance-field nave with a pointed barrel vault, transverse ribs, clustered piers, lancet window recesses and a great west window with tracery and a rose. Rays are sphere-traced against it.
 - **Glass**: every window is painted procedurally into a 4096 × 2048 canvas atlas. That includes the quarries, medallions, lead came, saddle bars and stone tracery, plus some streaky mottling.
