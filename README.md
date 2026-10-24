@@ -20,6 +20,17 @@ The light follows your local clock by default (**Now**). It blends between five 
 
 **Terracotta glass** swaps every window to a warm clay-orange palette with ivory, oat and sand panes.
 
+## Sound
+
+Tap **Sound** to hear the nave. Everything is synthesized in the browser with the Web Audio API. There are no audio files.
+
+- **Drone**: an organ-like drone whose mode and chords follow the hour. It is Dorian before dawn, Mixolydian at sunrise, open fifths at noon, a warm major at sunset and a low Aeolian at night.
+- **Chimes**: sparse glass chimes, more often by day and rarer at night.
+- **Hour bell**: a distant bell tolls the hour, from one to twelve strikes. It has its own toggle.
+- **Reverb**: a generated stone-hall reverb with a six-second tail.
+
+The mix is centred and low-passed, so nothing is shrill and nothing jumps between the left and right speakers.
+
 ## Controls
 
 - **Drag** anywhere to turn the sun. Double-click resets it.

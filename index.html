@@ -109,6 +109,8 @@ button:disabled{opacity:.45;cursor:default}
     <span class="sep" aria-hidden="true"></span>
     <button class="tool glassbtn" id="glass" aria-pressed="false"><span class="sw" aria-hidden="true"></span>Terracotta glass</button>
     <button class="tool" id="drift" aria-pressed="true"><span class="dot" aria-hidden="true"></span>Light drifting</button>
+    <button class="tool" id="sound" aria-pressed="false"><span class="dot" aria-hidden="true"></span>Sound</button>
+    <button class="tool" id="bell" aria-pressed="true" hidden><span class="dot" aria-hidden="true"></span>Hour bell</button>
     <button class="tool" id="gyro" aria-pressed="false" hidden><span class="dot" aria-hidden="true"></span>Gyroscope</button>
     <button class="tool" id="fs" hidden>Fullscreen</button>
   </div>
@@ -1024,6 +1026,119 @@ function render(phi){
 }
 const LZ_JS = 22.5;
 
+/* ---------- sound: an organ-like drone that follows the hour, sparse glass chimes and a distant hour bell,
+   all synthesized and sent through a generated stone-hall reverb. Everything sits in the centre of the
+   stereo field and is low-passed, so nothing is shrill or hard-panned. ---------- */
+const MODES = {
+  matins:   { chords: [[38,50,57,62,64],[36,48,55,60,64],[41,53,57,60,65],[43,55,59,62]], chime: [62,64,65,69,72,74], dur: 15, level: 0.7, gap: [9, 14] },
+  lauds:    { chords: [[43,55,59,62],[41,53,57,60],[48,55,60,64],[43,50,57,62]],          chime: [62,67,69,71,74,76], dur: 13, level: 0.85, gap: [6, 10] },
+  sext:     { chords: [[36,43,52,60],[36,45,53,60],[36,43,50,59],[36,48,55,64]],          chime: [60,64,67,69,72,76], dur: 13, level: 0.85, gap: [6, 10] },
+  vespers:  { chords: [[41,53,57,60,64],[38,50,57,60,65],[46,53,57,62],[36,48,53,55,60]], chime: [60,62,65,69,72,74], dur: 14, level: 0.85, gap: [7, 11] },
+  compline: { chords: [[33,45,52,60],[29,41,48,57],[31,43,50,59],[33,45,52,57]],          chime: [57,60,64,67,69],    dur: 18, level: 0.6, gap: [14, 16] }
+};
+const mtof = m => 440*Math.pow(2, (m - 69)/12);
+function makeIR(ctx, seconds){
+  const rate = ctx.sampleRate, len = Math.floor(rate*seconds), ir = ctx.createBuffer(2, len, rate), rnd = rng32(7);
+  for (let c = 0; c < 2; c++){
+    const d = ir.getChannelData(c); let lp = 0;
+    for (let i = 0; i < len; i++){
+      const t = i/rate, k = Math.min(0.94, 0.3 + t*0.11);           // stone swallows the highs as the tail goes on
+      lp = lp*k + (rnd()*2 - 1)*(1 - k);
+      d[i] = lp*Math.exp(-t*0.95)*Math.min(1, t/0.035);
+    }
+  }
+  return ir;
+}
+function Soundscape(ctx, out, hourKey){
+  const rnd = Math.random;
+  const conv = ctx.createConvolver(); conv.buffer = makeIR(ctx, 6.5);
+  const hall = ctx.createBiquadFilter(); hall.type = 'lowpass'; hall.frequency.value = 3600; hall.Q.value = 0.5;
+  const comp = ctx.createDynamicsCompressor();
+  comp.threshold.value = -22; comp.knee.value = 14; comp.ratio.value = 3; comp.attack.value = 0.03; comp.release.value = 0.5;
+  conv.connect(hall); hall.connect(comp); comp.connect(out);
+  function bus(level, dry, wet, lpHz){
+    const g = ctx.createGain(); g.gain.value = level;
+    const f = ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = lpHz; f.Q.value = 0.4; g.connect(f);
+    const d = ctx.createGain(); d.gain.value = dry; const w = ctx.createGain(); w.gain.value = wet;
+    f.connect(d); f.connect(w); d.connect(hall); w.connect(conv);
+    return g;
+  }
+  const padBus = bus(0.5, 0.35, 0.9, 1500), chimeBus = bus(0.5, 0.25, 1.0, 3000), bellBus = bus(1.4, 0.18, 1.1, 1900);
+  // the air of a big stone room: very soft brown noise, kept below 200 Hz
+  const nb = ctx.createBuffer(1, ctx.sampleRate*4, ctx.sampleRate), nd = nb.getChannelData(0);
+  let b = 0, peak = 0;
+  for (let i = 0; i < nd.length; i++){ b = 0.985*b + 0.015*(rnd()*2 - 1); nd[i] = b; peak = Math.max(peak, Math.abs(b)); }
+  for (let i = 0; i < nd.length; i++) nd[i] /= peak;
+  const ns = ctx.createBufferSource(); ns.buffer = nb; ns.loop = true;
+  const nlp = ctx.createBiquadFilter(); nlp.type = 'lowpass'; nlp.frequency.value = 180;
+  const ng = ctx.createGain(); ng.gain.value = 0.035;
+  ns.connect(nlp); nlp.connect(ng); ng.connect(hall); ns.start();
+
+  function chord(notes, t, dur, level){
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(level, t + 5);
+    g.gain.setValueAtTime(level, t + dur); g.gain.linearRampToValueAtTime(0, t + dur + 7);
+    g.connect(padBus);
+    notes.forEach((m, i) => {
+      const f = mtof(m), amp = (i === 0 ? 0.9 : 0.55)/notes.length;
+      // two softly detuned fundamentals, a quiet octave and a whisper of the twelfth: a flue-pipe colour
+      [[1, -4, 1], [1, 4, 1], [2, 0, 0.22], [3, 2, 0.05]].forEach(([mul, cents, a]) => {
+        const o = ctx.createOscillator(); o.type = 'sine'; o.frequency.value = f*mul; o.detune.value = cents;
+        const og = ctx.createGain(); og.gain.value = amp*a*0.5;
+        o.connect(og); og.connect(g); o.start(t); o.stop(t + dur + 7.5);
+      });
+    });
+  }
+  function chime(M, t){
+    const f = mtof(M.chime[Math.floor(rnd()*M.chime.length)]);
+    [[1, 1, 3.2], [2.76, 0.2, 1.1], [5.4, 0.05, 0.45]].forEach(([mul, a, dec]) => {
+      const o = ctx.createOscillator(); o.type = 'sine'; o.frequency.value = f*mul;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(a*0.05, t + 0.015);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dec);
+      o.connect(g); g.connect(chimeBus); o.start(t); o.stop(t + dec + 0.1);
+    });
+  }
+  function strike(t){
+    const f = 196;   // a low bell heard from the far end of the nave
+    [[0.5, 0.45, 9], [1, 0.35, 6.5], [1.19, 0.22, 4.5], [1.5, 0.12, 3.2], [2, 0.25, 3.6], [2.66, 0.07, 1.6]].forEach(([mul, a, dec]) => {
+      const o = ctx.createOscillator(); o.type = 'sine'; o.frequency.value = f*mul;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(a*0.16, t + 0.006);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dec);
+      o.connect(g); g.connect(bellBus); o.start(t); o.stop(t + dec + 0.1);
+    });
+  }
+  const S = { nextChord: ctx.currentTime + 0.1, nextChime: ctx.currentTime + 5, idx: 0, key: null };
+  S.scheduleUntil = tEnd => {
+    while (S.nextChord < tEnd){
+      const k = hourKey(), M = MODES[k];
+      if (k !== S.key){ S.key = k; S.idx = 0; }
+      chord(M.chords[S.idx++ % M.chords.length], S.nextChord, M.dur, M.level);
+      S.nextChord += M.dur;
+    }
+    while (S.nextChime < tEnd){
+      const M = MODES[hourKey()];
+      chime(M, S.nextChime);
+      if (rnd() < 0.3) chime(M, S.nextChime + 0.5 + rnd()*0.4);
+      S.nextChime += M.gap[0] + rnd()*M.gap[1];
+    }
+  };
+  S.toll = (n, t0) => { for (let k = 0; k < n; k++) strike(t0 + k*3.4); };
+  S.resetClock = () => { S.nextChord = Math.max(S.nextChord, ctx.currentTime + 0.1); S.nextChime = Math.max(S.nextChime, ctx.currentTime + 3); };
+  return S;
+}
+function encodeWav(buf){
+  const ch = buf.numberOfChannels, n = buf.length, rate = buf.sampleRate, out = new DataView(new ArrayBuffer(44 + n*ch*2));
+  const str = (o, t) => { for (let i = 0; i < t.length; i++) out.setUint8(o + i, t.charCodeAt(i)); };
+  str(0, 'RIFF'); out.setUint32(4, 36 + n*ch*2, true); str(8, 'WAVE'); str(12, 'fmt '); out.setUint32(16, 16, true);
+  out.setUint16(20, 1, true); out.setUint16(22, ch, true); out.setUint32(24, rate, true); out.setUint32(28, rate*ch*2, true);
+  out.setUint16(32, ch*2, true); out.setUint16(34, 16, true); str(36, 'data'); out.setUint32(40, n*ch*2, true);
+  const data = []; for (let c = 0; c < ch; c++) data.push(buf.getChannelData(c));
+  for (let i = 0, o = 44; i < n; i++) for (let c = 0; c < ch; c++, o += 2) out.setInt16(o, Math.max(-1, Math.min(1, data[c][i]))*32767, true);
+  return out.buffer;
+}
+
 /* ---------- export hooks (local rendering of the wallpaper files) ---------- */
 if (EXPORT){
   document.getElementById('hud').hidden = true;
@@ -1036,7 +1151,18 @@ if (EXPORT){
     },
     frame(i, n){ render(i/n*Math.PI*2); gl.finish(); return cv.toDataURL('image/png'); },
     sweep(i, n){ render(-Math.PI/2 + Math.PI*i/(n - 1)); gl.finish(); return cv.toDataURL('image/png'); },
-    atlas(){ return atlasCanvas.toDataURL('image/png'); }
+    atlas(){ return atlasCanvas.toDataURL('image/png'); },
+    async audio(seconds, pal, tollAt, tollN){
+      const ctx = new OfflineAudioContext(2, Math.round(44100*seconds), 44100);
+      const out = ctx.createGain(); out.gain.value = 0.8; out.connect(ctx.destination);
+      out.gain.setValueAtTime(0, 0); out.gain.linearRampToValueAtTime(0.8, 3); out.gain.setValueAtTime(0.8, seconds - 4); out.gain.linearRampToValueAtTime(0, seconds);
+      const S = Soundscape(ctx, out, () => pal);
+      if (pal !== 'bell') S.scheduleUntil(seconds); if (tollN) S.toll(tollN, tollAt);
+      const buf = await ctx.startRendering();
+      const bytes = new Uint8Array(encodeWav(buf)); let bin = '';
+      for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+      return btoa(bin);
+    }
   };
   window.__naveReady = true;
   return;
@@ -1184,6 +1310,72 @@ if (reqFS && (document.fullscreenEnabled || document.webkitFullscreenEnabled)){
     } catch (e){ fsBtn.hidden = true; }
   });
 }
+/* ---------- live sound ---------- */
+const soundBtn = document.getElementById('sound'), bellBtn = document.getElementById('bell');
+const snd = { ctx: null, out: null, S: null, on: false, bell: true, timer: 0, lastToll: -1 };
+try { snd.bell = localStorage.getItem('vitrail.bell') !== '0'; } catch (e) {}
+const hourKeyNow = () => state.pal === 'now' ? (curPal(), blendCache.near) : state.pal;
+function soundSync(){
+  soundBtn.setAttribute('aria-pressed', String(snd.on));
+  bellBtn.hidden = !snd.on; bellBtn.setAttribute('aria-pressed', String(snd.bell));
+}
+function soundStart(){
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC){ showNote('This browser cannot play sound.', 3500); return; }
+  try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
+  if (!snd.ctx){
+    snd.ctx = new AC();
+    snd.out = snd.ctx.createGain(); snd.out.gain.value = 0; snd.out.connect(snd.ctx.destination);
+    snd.S = Soundscape(snd.ctx, snd.out, hourKeyNow);
+  }
+  snd.ctx.resume();
+  snd.S.resetClock();
+  const t = snd.ctx.currentTime;
+  snd.out.gain.cancelScheduledValues(t); snd.out.gain.setValueAtTime(snd.out.gain.value, t); snd.out.gain.linearRampToValueAtTime(1.0, t + 3);
+  clearInterval(snd.timer);
+  snd.timer = setInterval(() => {
+    if (!snd.on || document.hidden) return;
+    snd.S.scheduleUntil(snd.ctx.currentTime + 4);
+    const d = new Date();
+    if (snd.bell && d.getMinutes() === 0 && d.getSeconds() < 10 && d.getHours() !== snd.lastToll){
+      snd.lastToll = d.getHours(); snd.S.toll(d.getHours() % 12 || 12, snd.ctx.currentTime + 0.3);
+    }
+  }, 500);
+  snd.S.scheduleUntil(snd.ctx.currentTime + 4);
+  snd.on = true; soundSync();
+}
+function soundStop(){
+  snd.on = false; soundSync(); clearInterval(snd.timer);
+  if (!snd.ctx) return;
+  const t = snd.ctx.currentTime;
+  snd.out.gain.cancelScheduledValues(t); snd.out.gain.setValueAtTime(snd.out.gain.value, t); snd.out.gain.linearRampToValueAtTime(0, t + 1.5);
+  setTimeout(() => { if (!snd.on && snd.ctx) snd.ctx.suspend(); }, 1700);
+}
+soundBtn.addEventListener('click', () => {
+  if (snd.on) soundStop(); else soundStart();
+  try { localStorage.setItem('vitrail.sound', snd.on ? '1' : '0'); } catch (e) {}
+});
+bellBtn.addEventListener('click', () => {
+  snd.bell = !snd.bell; soundSync();
+  try { localStorage.setItem('vitrail.bell', snd.bell ? '1' : '0'); } catch (e) {}
+  if (snd.bell && snd.on) snd.S.toll(1, snd.ctx.currentTime + 0.2);
+});
+document.addEventListener('visibilitychange', () => {
+  if (!snd.ctx) return;
+  if (document.hidden) snd.ctx.suspend(); else if (snd.on){ snd.ctx.resume(); snd.S.resetClock(); }
+});
+// browsers only start audio after a tap, so a remembered "sound on" waits for the first one
+let wantSound = false;
+try { wantSound = localStorage.getItem('vitrail.sound') === '1'; } catch (e) {}
+if (wantSound){
+  const kick = e => {
+    if (e && e.target && e.target.closest && e.target.closest('#sound')) return;
+    removeEventListener('pointerup', kick, true); removeEventListener('keydown', kick, true);
+    if (!snd.on) soundStart();
+  };
+  addEventListener('pointerup', kick, true); addEventListener('keydown', kick, true);
+}
+soundSync();
 })();
 </script>
 
