@@ -8,7 +8,7 @@ A Gothic nave lit only by its stained-glass windows. Shafts of coloured light cr
 
 ## The hours
 
-The light follows your local clock by default (**Now**). It blends between five canonical hours as the day goes on. You can also pick one:
+The light follows your local clock by default (**Now**), blending between five canonical hours as the day goes on. The slider in the control bar runs across a whole day and is tinted like the light. Drag it, or tap anywhere on it, to visit another time of day, and tap **Now** to go back to the clock. The arrow keys move it in 15-minute steps.
 
 | Hour | Time | Light |
 |---|---|---|
