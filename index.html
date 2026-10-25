@@ -1132,7 +1132,7 @@ function Soundscape(ctx, out, hourKey, opts = {}){
 /* render one hour's soundscape as a seamless loop: a whole number of chord cycles, with the reverb tail
    folded back onto the start, so an <audio loop> element can keep playing when the page is in the background */
 async function renderLoop(key){
-  const M = MODES[key], cyc = M.dur*M.chords.length, L = cyc*Math.max(1, Math.round(220/cyc)), tail = 14, rate = 22050;
+  const M = MODES[key], cyc = M.dur*M.chords.length, L = cyc*Math.max(1, Math.round(220/cyc)), tail = 14, rate = 11025;   // everything sits below 4 kHz, so 11 kHz sampling loses nothing
   const ctx = new OfflineAudioContext(1, Math.round(rate*(L + tail)), rate);
   const out = ctx.createGain(); out.gain.value = 1.0; out.connect(ctx.destination);
   const S = Soundscape(ctx, out, () => key, { start: 0, noiseStop: L });
@@ -1145,16 +1145,19 @@ async function renderLoop(key){
   for (let i = 0; i < n; i++) loop[i] *= k;
   return { channels: [loop], rate, seconds: L };
 }
-function encodeWav(buf){
+function encodeWav(buf, repeat = 1){
   const chans = buf.channels || Array.from({ length: buf.numberOfChannels }, (_, c) => buf.getChannelData(c));
-  const ch = chans.length, n = chans[0].length, rate = buf.rate || buf.sampleRate, out = new DataView(new ArrayBuffer(44 + n*ch*2));
+  const ch = chans.length, n0 = chans[0].length, rate = buf.rate || buf.sampleRate, one = n0*ch*2, bytes = one*repeat;
+  const ab = new ArrayBuffer(44 + bytes), out = new DataView(ab);
   const str = (o, t) => { for (let i = 0; i < t.length; i++) out.setUint8(o + i, t.charCodeAt(i)); };
-  str(0, 'RIFF'); out.setUint32(4, 36 + n*ch*2, true); str(8, 'WAVE'); str(12, 'fmt '); out.setUint32(16, 16, true);
+  str(0, 'RIFF'); out.setUint32(4, 36 + bytes, true); str(8, 'WAVE'); str(12, 'fmt '); out.setUint32(16, 16, true);
   out.setUint16(20, 1, true); out.setUint16(22, ch, true); out.setUint32(24, rate, true); out.setUint32(28, rate*ch*2, true);
-  out.setUint16(32, ch*2, true); out.setUint16(34, 16, true); str(36, 'data'); out.setUint32(40, n*ch*2, true);
-  const data = chans;
-  for (let i = 0, o = 44; i < n; i++) for (let c = 0; c < ch; c++, o += 2) out.setInt16(o, Math.max(-1, Math.min(1, data[c][i]))*32767, true);
-  return out.buffer;
+  out.setUint16(32, ch*2, true); out.setUint16(34, 16, true); str(36, 'data'); out.setUint32(40, bytes, true);
+  for (let i = 0, o = 44; i < n0; i++) for (let c = 0; c < ch; c++, o += 2) out.setInt16(o, Math.max(-1, Math.min(1, chans[c][i]))*32767, true);
+  // a seamless loop can be written out several times over, so the player only has to jump back rarely
+  const u8 = new Uint8Array(ab), first = u8.subarray(44, 44 + one);
+  for (let k = 1; k < repeat; k++) u8.set(first, 44 + k*one);
+  return ab;
 }
 
 /* ---------- export hooks (local rendering of the wallpaper files) ---------- */
@@ -1367,11 +1370,14 @@ async function getLoop(key){
   const hit = snd.cache.get(key);
   if (hit){ snd.cache.delete(key); snd.cache.set(key, hit); return hit; }
   const r = await renderLoop(key);
-  const e = { key, data: r.channels[0], rate: r.rate, len: r.seconds,
-              url: URL.createObjectURL(new Blob([encodeWav(r)], { type: 'audio/wav' })) };
+  // iOS leaves a small hiccup each time an <audio> element jumps back to the start of a loop, so the
+  // three-to-four-minute loop is written out to about forty minutes and the jump happens rarely
+  const copies = Math.max(1, Math.round(2400/r.seconds));
+  const e = { key, data: r.channels[0], rate: r.rate, len: r.seconds*copies,
+              url: URL.createObjectURL(new Blob([encodeWav(r, copies)], { type: 'audio/wav' })) };
   snd.cache.set(key, e);
-  for (const [k, v] of snd.cache){   // keep the three most recent hours
-    if (snd.cache.size <= 3) break;
+  for (const [k, v] of snd.cache){   // keep the two most recent hours
+    if (snd.cache.size <= 2) break;
     if (v !== snd.playing){ URL.revokeObjectURL(v.url); snd.cache.delete(k); }
   }
   return e;

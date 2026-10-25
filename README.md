@@ -33,7 +33,7 @@ The mix is centred and low-passed, so nothing is shrill and nothing jumps betwee
 
 ### Listening in the background
 
-The drone and chimes keep playing when you switch to another app or lock the screen, like a music app, and they show up in the lock-screen media controls. To make that possible, the page renders the current hour's soundscape into a seamless loop of three to four minutes (this takes a few seconds the first time) and plays it through an ordinary `<audio>` element. While the page is open, a change of hour crossfades into the next hour's loop.
+The drone and chimes keep playing when you switch to another app or lock the screen, like a music app, and they show up in the lock-screen media controls. To make that possible, the page renders the current hour's soundscape into a seamless loop of three to four minutes (this takes a few seconds the first time), writes it out end to end into a track of about forty minutes, and plays that through an ordinary `<audio>` element. iOS leaves a tiny hiccup each time a looping element jumps back to the start, so a long track keeps that to once every forty minutes. While the page is open, a change of hour crossfades into the next hour's loop.
 
 Two things only happen while the page is on screen: the hour bell, and following the clock into the next hour. When you come back, the music catches up.
 
