@@ -1049,7 +1049,7 @@ function makeIR(ctx, seconds){
   }
   return ir;
 }
-function Soundscape(ctx, out, hourKey){
+function Soundscape(ctx, out, hourKey, opts = {}){
   const rnd = Math.random;
   const conv = ctx.createConvolver(); conv.buffer = makeIR(ctx, 6.5);
   const hall = ctx.createBiquadFilter(); hall.type = 'lowpass'; hall.frequency.value = 3600; hall.Q.value = 0.5;
@@ -1072,7 +1072,8 @@ function Soundscape(ctx, out, hourKey){
   const ns = ctx.createBufferSource(); ns.buffer = nb; ns.loop = true;
   const nlp = ctx.createBiquadFilter(); nlp.type = 'lowpass'; nlp.frequency.value = 180;
   const ng = ctx.createGain(); ng.gain.value = 0.035;
-  ns.connect(nlp); nlp.connect(ng); ng.connect(hall); ns.start();
+  ns.connect(nlp); nlp.connect(ng); ng.connect(hall);
+  if (opts.noise !== false){ ns.start(); if (opts.noiseStop) ns.stop(opts.noiseStop); }
 
   function chord(notes, t, dur, level){
     const g = ctx.createGain();
@@ -1109,7 +1110,7 @@ function Soundscape(ctx, out, hourKey){
       o.connect(g); g.connect(bellBus); o.start(t); o.stop(t + dec + 0.1);
     });
   }
-  const S = { nextChord: ctx.currentTime + 0.1, nextChime: ctx.currentTime + 5, idx: 0, key: null };
+  const S = { nextChord: ctx.currentTime + (opts.start ?? 0.1), nextChime: ctx.currentTime + 5, idx: 0, key: null };
   S.scheduleUntil = tEnd => {
     while (S.nextChord < tEnd){
       const k = hourKey(), M = MODES[k];
@@ -1128,13 +1129,30 @@ function Soundscape(ctx, out, hourKey){
   S.resetClock = () => { S.nextChord = Math.max(S.nextChord, ctx.currentTime + 0.1); S.nextChime = Math.max(S.nextChime, ctx.currentTime + 3); };
   return S;
 }
+/* render one hour's soundscape as a seamless loop: a whole number of chord cycles, with the reverb tail
+   folded back onto the start, so an <audio loop> element can keep playing when the page is in the background */
+async function renderLoop(key){
+  const M = MODES[key], cyc = M.dur*M.chords.length, L = cyc*Math.max(1, Math.round(220/cyc)), tail = 14, rate = 22050;
+  const ctx = new OfflineAudioContext(1, Math.round(rate*(L + tail)), rate);
+  const out = ctx.createGain(); out.gain.value = 1.0; out.connect(ctx.destination);
+  const S = Soundscape(ctx, out, () => key, { start: 0, noiseStop: L });
+  S.scheduleUntil(L - 0.01);
+  const buf = await ctx.startRendering(), d = buf.getChannelData(0), n = Math.round(rate*L), nt = d.length - n;
+  const loop = new Float32Array(n); loop.set(d.subarray(0, n));
+  for (let i = 0; i < nt && i < n; i++) loop[i] += d[n + i];
+  let peak = 0; for (let i = 0; i < n; i++) peak = Math.max(peak, Math.abs(loop[i]));
+  const k = peak > 0.95 ? 0.95/peak : 1;   // same loudness as the live engine, only guarded against clipping
+  for (let i = 0; i < n; i++) loop[i] *= k;
+  return { channels: [loop], rate, seconds: L };
+}
 function encodeWav(buf){
-  const ch = buf.numberOfChannels, n = buf.length, rate = buf.sampleRate, out = new DataView(new ArrayBuffer(44 + n*ch*2));
+  const chans = buf.channels || Array.from({ length: buf.numberOfChannels }, (_, c) => buf.getChannelData(c));
+  const ch = chans.length, n = chans[0].length, rate = buf.rate || buf.sampleRate, out = new DataView(new ArrayBuffer(44 + n*ch*2));
   const str = (o, t) => { for (let i = 0; i < t.length; i++) out.setUint8(o + i, t.charCodeAt(i)); };
   str(0, 'RIFF'); out.setUint32(4, 36 + n*ch*2, true); str(8, 'WAVE'); str(12, 'fmt '); out.setUint32(16, 16, true);
   out.setUint16(20, 1, true); out.setUint16(22, ch, true); out.setUint32(24, rate, true); out.setUint32(28, rate*ch*2, true);
   out.setUint16(32, ch*2, true); out.setUint16(34, 16, true); str(36, 'data'); out.setUint32(40, n*ch*2, true);
-  const data = []; for (let c = 0; c < ch; c++) data.push(buf.getChannelData(c));
+  const data = chans;
   for (let i = 0, o = 44; i < n; i++) for (let c = 0; c < ch; c++, o += 2) out.setInt16(o, Math.max(-1, Math.min(1, data[c][i]))*32767, true);
   return out.buffer;
 }
@@ -1152,6 +1170,11 @@ if (EXPORT){
     frame(i, n){ render(i/n*Math.PI*2); gl.finish(); return cv.toDataURL('image/png'); },
     sweep(i, n){ render(-Math.PI/2 + Math.PI*i/(n - 1)); gl.finish(); return cv.toDataURL('image/png'); },
     atlas(){ return atlasCanvas.toDataURL('image/png'); },
+    async loop(pal){
+      const t0 = performance.now(), r = await renderLoop(pal), bytes = new Uint8Array(encodeWav(r)); let bin = '';
+      for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+      return { ms: performance.now() - t0, seconds: r.seconds, wav: btoa(bin) };
+    },
     async audio(seconds, pal, tollAt, tollN){
       const ctx = new OfflineAudioContext(2, Math.round(44100*seconds), 44100);
       const out = ctx.createGain(); out.gain.value = 0.8; out.connect(ctx.destination);
@@ -1310,46 +1333,176 @@ if (reqFS && (document.fullscreenEnabled || document.webkitFullscreenEnabled)){
     } catch (e){ fsBtn.hidden = true; }
   });
 }
-/* ---------- live sound ---------- */
+/* ---------- live sound ----------
+   The drone and chimes are rendered once per hour into a seamless loop and played by an <audio> element, so they
+   keep going when you switch apps or lock the screen, the way a music app does. Two elements take turns: while the
+   page is open, a change of hour crossfades from one to the other, with Web Audio covering the seam. Web Audio also
+   rings the hour bell, which only sounds while the page is open. */
 const soundBtn = document.getElementById('sound'), bellBtn = document.getElementById('bell');
-const snd = { ctx: null, out: null, S: null, on: false, bell: true, timer: 0, lastToll: -1 };
+const XF = 6;   // crossfade, seconds
+// equal-power curves: two different hours are uncorrelated, so a straight-line crossfade would dip in the middle
+const EQ_IN = Float32Array.from({ length: 64 }, (_, i) => Math.sin(i/63*Math.PI/2)), EQ_OUT = EQ_IN.slice().reverse();
+const snd = { on: false, bell: true, els: [], cur: 0, playing: null, cache: new Map(), busy: false, finish: null,
+              ctx: null, out: null, S: null, timer: 0, lastToll: -1, silent: null };
 try { snd.bell = localStorage.getItem('vitrail.bell') !== '0'; } catch (e) {}
+if (/[?&]debug\b/.test(location.search)) window.__snd = snd;
 const hourKeyNow = () => state.pal === 'now' ? (curPal(), blendCache.near) : state.pal;
+const HOUR_NAME = { matins: 'Matins', lauds: 'Lauds', sext: 'Sext', vespers: 'Vespers', compline: 'Compline' };
+const wait = ms => new Promise(r => setTimeout(r, ms));
 function soundSync(){
   soundBtn.setAttribute('aria-pressed', String(snd.on));
   bellBtn.hidden = !snd.on; bellBtn.setAttribute('aria-pressed', String(snd.bell));
 }
-function soundStart(){
+function hush(el){ if (!el.paused){ el._ours = true; el.pause(); } }
+function makeEl(){
+  const el = new Audio(); el.setAttribute('playsinline', ''); el.preload = 'auto'; el.loop = true;
+  // a pause we did not ask for (a phone call, another app's music, the lock screen) turns the button off
+  el.addEventListener('pause', () => {
+    if (el._ours){ el._ours = false; return; }
+    if (snd.on && el === snd.els[snd.cur] && snd.playing){ snd.on = false; clearInterval(snd.timer); soundSync(); }
+  });
+  return el;
+}
+async function getLoop(key){
+  const hit = snd.cache.get(key);
+  if (hit){ snd.cache.delete(key); snd.cache.set(key, hit); return hit; }
+  const r = await renderLoop(key);
+  const e = { key, data: r.channels[0], rate: r.rate, len: r.seconds,
+              url: URL.createObjectURL(new Blob([encodeWav(r)], { type: 'audio/wav' })) };
+  snd.cache.set(key, e);
+  for (const [k, v] of snd.cache){   // keep the three most recent hours
+    if (snd.cache.size <= 3) break;
+    if (v !== snd.playing){ URL.revokeObjectURL(v.url); snd.cache.delete(k); }
+  }
+  return e;
+}
+function mediaSession(state){
+  if (!('mediaSession' in navigator)) return;
+  try {
+    const icon = document.querySelector('link[rel="apple-touch-icon"]');
+    navigator.mediaSession.metadata = new MediaMetadata({ title: 'Vitrail', artist: snd.playing ? HOUR_NAME[snd.playing.key] : '', album: 'Vitrail',
+      artwork: icon ? [{ src: new URL(icon.getAttribute('href'), location.href).href, sizes: '180x180', type: 'image/png' }] : [] });
+    navigator.mediaSession.playbackState = state;
+    navigator.mediaSession.setActionHandler('play', () => { if (!snd.on) soundStart(); });
+    navigator.mediaSession.setActionHandler('pause', () => { if (snd.on) soundStop(); });
+  } catch (e) {}
+}
+function bellCtx(){
   const AC = window.AudioContext || window.webkitAudioContext;
-  if (!AC){ showNote('This browser cannot play sound.', 3500); return; }
-  try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
+  if (!AC) return null;
   if (!snd.ctx){
     snd.ctx = new AC();
-    snd.out = snd.ctx.createGain(); snd.out.gain.value = 0; snd.out.connect(snd.ctx.destination);
-    snd.S = Soundscape(snd.ctx, snd.out, hourKeyNow);
+    snd.out = snd.ctx.createGain(); snd.out.connect(snd.ctx.destination);
+    const bells = snd.ctx.createGain(); bells.connect(snd.out);
+    snd.S = Soundscape(snd.ctx, bells, hourKeyNow, { noise: false });
   }
-  snd.ctx.resume();
-  snd.S.resetClock();
-  const t = snd.ctx.currentTime;
-  snd.out.gain.cancelScheduledValues(t); snd.out.gain.setValueAtTime(snd.out.gain.value, t); snd.out.gain.linearRampToValueAtTime(1.0, t + 3);
+  if (snd.ctx.state !== 'running') snd.ctx.resume().catch(() => {});
+  return snd.ctx;
+}
+// play a stretch of a rendered loop through Web Audio, starting at time t, with a gain envelope
+function cover(e, pos, t, dur, env){
+  const ctx = snd.ctx, n = Math.round(dur*e.rate), L = e.data.length, b = ctx.createBuffer(1, n, e.rate), d = b.getChannelData(0);
+  let i0 = Math.round(pos*e.rate) % L;
+  for (let i = 0; i < n; i++){ d[i] = e.data[i0]; if (++i0 >= L) i0 = 0; }
+  const src = ctx.createBufferSource(); src.buffer = b;
+  const g = ctx.createGain(); env(g.gain, t); src.connect(g); g.connect(snd.out);
+  src.start(t); src.stop(t + dur);
+  return g;
+}
+const live = () => snd.ctx && snd.ctx.state === 'running' && !document.hidden;
+function canPlay(el){
+  return el.readyState >= 3 ? Promise.resolve() : Promise.race([
+    new Promise(r => el.addEventListener('canplaythrough', r, { once: true })), wait(4000)]);
+}
+// move from whatever is playing to loop e at position pos (seconds)
+async function crossTo(e, pos){
+  const A = snd.els[snd.cur], from = !A.paused && snd.playing ? snd.playing : null;
+  if (snd.ctx && snd.ctx.state !== 'running' && !document.hidden) await Promise.race([snd.ctx.resume(), wait(800)]).catch(() => {});
+  if (!live()){
+    // in the background, or no Web Audio: a plain cut on the same element
+    hush(A); if (A.src !== e.url) A.src = e.url;
+    A.loop = true; await canPlay(A); A.currentTime = pos % e.len;
+    snd.playing = e; await A.play().catch(() => {});
+    mediaSession('playing'); return;
+  }
+  const B = snd.els[1 - snd.cur], ctx = snd.ctx;
+  if (B.src !== e.url) B.src = e.url;
+  B.loop = true; await canPlay(B);
+  const lead = 0.15, t0 = ctx.currentTime + lead;
+  if (from){
+    const p0 = A.currentTime + lead;
+    cover(from, p0, t0, XF + 0.2, (g, t) => { g.setValueAtTime(0, t); g.linearRampToValueAtTime(1, t + 0.08); g.setValueCurveAtTime(EQ_OUT, t + 0.09, XF - 0.09); });
+  }
+  const gIn = cover(e, pos, t0, XF + 3, (g, t) => { g.setValueCurveAtTime(EQ_IN, t, XF); });
+  setTimeout(() => hush(A), lead*1000 + 40);   // a hair late, so the handover overlaps rather than gaps
+  snd.playing = e; snd.cur = 1 - snd.cur;
+  let done = false;
+  const handOver = async () => {
+    if (done) return; done = true; snd.finish = null;
+    B.currentTime = (pos + Math.max(0, ctx.currentTime - t0) + 0.05) % e.len;
+    await B.play().catch(() => {});
+    const t = ctx.currentTime;
+    gIn.gain.cancelScheduledValues(t); gIn.gain.setValueAtTime(gIn.gain.value, t); gIn.gain.linearRampToValueAtTime(0, t + 0.3);
+    mediaSession('playing');
+  };
+  snd.finish = () => { hush(A); handOver(); };
+  await wait((lead + XF)*1000 - 120);
+  await handOver();
+}
+// keep the element playing the loop for the hour we are in; serialised so taps and clock ticks do not overlap
+async function ensure(){
+  if (snd.busy) return; snd.busy = true;
+  try {
+    for (let guard = 0; guard < 6 && snd.on; guard++){
+      const key = hourKeyNow(), A = snd.els[snd.cur];
+      if (snd.playing && snd.playing.key === key && !A.paused) break;
+      if (!snd.cache.has(key)) showNote('Preparing the sound…', 3000);
+      const e = await getLoop(key);
+      if (!snd.on) break;
+      if (hourKeyNow() !== key) continue;
+      const resume = snd.playing === e && A.paused;
+      await crossTo(e, resume ? A.currentTime : 0);
+    }
+  } catch (err){ console.error(err); showNote('The sound could not be prepared: ' + String(err).slice(0, 120), 4000); }
+  finally { snd.busy = false; }
+}
+function soundStart(){
+  try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
+  if (!snd.els.length){
+    snd.els = [makeEl(), makeEl()];
+    snd.silent = URL.createObjectURL(new Blob([encodeWav({ channels: [new Float32Array(4410)], rate: 22050 })], { type: 'audio/wav' }));
+  }
+  // browsers only let an element play after a tap; start both here (silently if nothing is ready yet)
+  snd.els.forEach((el, i) => {
+    if (el._unlocked) return; el._unlocked = true;
+    if (!el.src) el.src = snd.silent;
+    const p = el.play(); if (p) p.then(() => { if (i !== snd.cur) hush(el); }).catch(() => { el._unlocked = false; });
+  });
+  snd.on = true; soundSync();
+  bellCtx();
   clearInterval(snd.timer);
   snd.timer = setInterval(() => {
     if (!snd.on || document.hidden) return;
-    snd.S.scheduleUntil(snd.ctx.currentTime + 4);
+    if (!snd.busy && (!snd.playing || snd.playing.key !== hourKeyNow())) ensure();
     const d = new Date();
-    if (snd.bell && d.getMinutes() === 0 && d.getSeconds() < 10 && d.getHours() !== snd.lastToll){
-      snd.lastToll = d.getHours(); snd.S.toll(d.getHours() % 12 || 12, snd.ctx.currentTime + 0.3);
+    if (snd.bell && snd.ctx && d.getMinutes() === 0 && d.getSeconds() < 10 && d.getHours() !== snd.lastToll){
+      snd.lastToll = d.getHours(); bellCtx(); snd.S.toll(d.getHours() % 12 || 12, snd.ctx.currentTime + 0.3);
     }
-  }, 500);
-  snd.S.scheduleUntil(snd.ctx.currentTime + 4);
-  snd.on = true; soundSync();
+  }, 1000);
+  ensure();
 }
 function soundStop(){
   snd.on = false; soundSync(); clearInterval(snd.timer);
-  if (!snd.ctx) return;
-  const t = snd.ctx.currentTime;
-  snd.out.gain.cancelScheduledValues(t); snd.out.gain.setValueAtTime(snd.out.gain.value, t); snd.out.gain.linearRampToValueAtTime(0, t + 1.5);
-  setTimeout(() => { if (!snd.on && snd.ctx) snd.ctx.suspend(); }, 1700);
+  if (snd.finish) snd.finish();
+  const A = snd.els[snd.cur];
+  if (A && !A.paused && snd.playing && live()){
+    // fade out over two seconds instead of cutting off
+    const t = snd.ctx.currentTime + 0.05;
+    cover(snd.playing, A.currentTime + 0.05, t, 2.2, (g, t) => { g.setValueAtTime(1, t); g.linearRampToValueAtTime(0, t + 2); });
+    setTimeout(() => hush(A), 90);
+  } else if (A) hush(A);
+  mediaSession('paused');
+  setTimeout(() => { if (!snd.on && snd.ctx) snd.ctx.suspend(); }, 2600);
 }
 soundBtn.addEventListener('click', () => {
   if (snd.on) soundStop(); else soundStart();
@@ -1358,13 +1511,18 @@ soundBtn.addEventListener('click', () => {
 bellBtn.addEventListener('click', () => {
   snd.bell = !snd.bell; soundSync();
   try { localStorage.setItem('vitrail.bell', snd.bell ? '1' : '0'); } catch (e) {}
-  if (snd.bell && snd.on) snd.S.toll(1, snd.ctx.currentTime + 0.2);
+  if (snd.bell && snd.on && bellCtx()) snd.S.toll(1, snd.ctx.currentTime + 0.2);
 });
 document.addEventListener('visibilitychange', () => {
-  if (!snd.ctx) return;
-  if (document.hidden) snd.ctx.suspend(); else if (snd.on){ snd.ctx.resume(); snd.S.resetClock(); }
+  if (document.hidden){
+    if (snd.finish) snd.finish();   // never leave a crossfade half done when Web Audio is about to be paused
+    if (snd.ctx) snd.ctx.suspend();
+  } else if (snd.on){
+    bellCtx();
+    if (!snd.busy && (!snd.playing || snd.playing.key !== hourKeyNow())) ensure();
+  }
 });
-// browsers only start audio after a tap, so a remembered "sound on" waits for the first one
+// a remembered "sound on" waits for the first tap, since browsers only start audio after one
 let wantSound = false;
 try { wantSound = localStorage.getItem('vitrail.sound') === '1'; } catch (e) {}
 if (wantSound){

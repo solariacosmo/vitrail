@@ -31,6 +31,14 @@ Tap **Sound** to hear the nave. Everything is synthesized in the browser with th
 
 The mix is centred and low-passed, so nothing is shrill and nothing jumps between the left and right speakers.
 
+### Listening in the background
+
+The drone and chimes keep playing when you switch to another app or lock the screen, like a music app, and they show up in the lock-screen media controls. To make that possible, the page renders the current hour's soundscape into a seamless loop of three to four minutes (this takes a few seconds the first time) and plays it through an ordinary `<audio>` element. While the page is open, a change of hour crossfades into the next hour's loop.
+
+Two things only happen while the page is on screen: the hour bell, and following the clock into the next hour. When you come back, the music catches up.
+
+On iPhone and iPad, Safari is the most reliable for background playback. Some other browsers on iOS stop all sound when they go to the background.
+
 ## Controls
 
 - **Drag** anywhere to turn the sun. Double-click resets it.
