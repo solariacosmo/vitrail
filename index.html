@@ -1037,9 +1037,9 @@ const LZ_JS = 22.5;
    stereo field and is low-passed, so nothing is shrill or hard-panned. ---------- */
 const MODES = {
   matins:   { chords: [[38,50,57,62,64],[36,48,55,60,64],[41,53,57,60,65],[43,55,59,62]], chime: [62,64,65,69,72,74], dur: 15, level: 0.7, gap: [9, 14] },
-  lauds:    { chords: [[43,55,59,62],[41,53,57,60],[48,55,60,64],[43,50,57,62]],          chime: [62,67,69,71,74,76], dur: 13, level: 0.85, gap: [6, 10] },
-  sext:     { chords: [[36,43,52,60],[36,45,53,60],[36,43,50,59],[36,48,55,64]],          chime: [60,64,67,69,72,76], dur: 13, level: 0.85, gap: [6, 10] },
-  vespers:  { chords: [[41,53,57,60,64],[38,50,57,60,65],[46,53,57,62],[36,48,53,55,60]], chime: [60,62,65,69,72,74], dur: 14, level: 0.85, gap: [7, 11] },
+  lauds:    { chords: [[43,55,59,62],[41,53,57,60],[48,55,60,64],[43,50,57,62]],          chime: [62,67,69,71,74,76], dur: 15, level: 0.85, gap: [6, 10] },
+  sext:     { chords: [[36,43,52,60],[36,45,53,60],[36,43,50,59],[36,48,55,64]],          chime: [60,64,67,69,72,76], dur: 15, level: 0.85, gap: [6, 10] },
+  vespers:  { chords: [[41,53,57,60,64],[38,50,57,60,65],[46,53,57,62],[36,48,53,55,60]], chime: [60,62,65,69,72,74], dur: 15, level: 0.85, gap: [7, 11] },
   compline: { chords: [[33,45,52,60],[29,41,48,57],[31,43,50,59],[33,45,52,57]],          chime: [57,60,64,67,69],    dur: 18, level: 0.6, gap: [14, 16] }
 };
 const mtof = m => 440*Math.pow(2, (m - 69)/12);
@@ -1108,7 +1108,7 @@ function Soundscape(ctx, out, hourKey, opts = {}){
   }
   function strike(t){
     const f = 196;   // a low bell heard from the far end of the nave
-    [[0.5, 0.45, 9], [1, 0.35, 6.5], [1.19, 0.22, 4.5], [1.5, 0.12, 3.2], [2, 0.25, 3.6], [2.66, 0.07, 1.6]].forEach(([mul, a, dec]) => {
+    [[0.5, 0.45, 9], [1, 0.35, 6.5], [1.19, 0.22, 4.5], [1.5, 0.12, 3.2], [2, 0.25, 3.6], [2.66, 0.07, 1.6], [3, 0.1, 2.4], [4.2, 0.05, 1.3]].forEach(([mul, a, dec]) => {
       const o = ctx.createOscillator(); o.type = 'sine'; o.frequency.value = f*mul;
       const g = ctx.createGain();
       g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(a*0.16, t + 0.006);
@@ -1137,8 +1137,49 @@ function Soundscape(ctx, out, hourKey, opts = {}){
 }
 /* render one hour's soundscape as a seamless loop: a whole number of chord cycles, with the reverb tail
    folded back onto the start, so an <audio loop> element can keep playing when the page is in the background */
+const SND_RATE = 8000;   // everything is low-passed below 4 kHz, so 8 kHz sampling keeps it all and halves the size
+const BELL_AT = 0.6, BELL_GAP = 3.4, BELL_GAIN = 2.6, BELL_DUCK = 0.7;
+// the hour bell on its own: n strikes 3.4 s apart, starting BELL_AT seconds in
+async function renderBell(n, rate){
+  const ctx = new OfflineAudioContext(1, Math.round(rate*(BELL_AT + (n - 1)*BELL_GAP + 16)), rate);
+  const out = ctx.createGain(); out.connect(ctx.destination);
+  Soundscape(ctx, out, () => 'compline', { noise: false }).toll(n, BELL_AT);
+  return (await ctx.startRendering()).getChannelData(0).slice();
+}
+// lay the bell over the start of one loop; the drone dips a little while the bell speaks
+function withBell(cycle, bell, rate, n){
+  const out = cycle.slice(), t0 = BELL_AT - 0.5, t1 = BELL_AT, t2 = BELL_AT + (n - 1)*BELL_GAP + 2, t3 = t2 + 6;
+  const duck = t => t < t0 ? 1 : t < t1 ? 1 - (1 - BELL_DUCK)*(t - t0)/(t1 - t0) : t < t2 ? BELL_DUCK : t < t3 ? BELL_DUCK + (1 - BELL_DUCK)*(t - t2)/(t3 - t2) : 1;
+  let g = BELL_GAIN;
+  for (let pass = 0; pass < 4; pass++){
+    let peak = 0;
+    for (let i = 0; i < bell.length && i < out.length; i++){ const v = cycle[i]*duck(i/rate) + g*bell[i]; out[i] = v; peak = Math.max(peak, Math.abs(v)); }
+    if (peak <= 0.98) break;
+    g *= 0.97*0.98/peak;
+  }
+  return out;
+}
+// a WAV whose first loop carries the bell and whose other copies are the plain loop
+function trackWav(first, cycle, rate, copies){
+  const n0 = cycle.length, one = n0*2, bytes = one*copies, ab = new ArrayBuffer(44 + bytes), out = new DataView(ab);
+  const str = (o, t) => { for (let i = 0; i < t.length; i++) out.setUint8(o + i, t.charCodeAt(i)); };
+  str(0, 'RIFF'); out.setUint32(4, 36 + bytes, true); str(8, 'WAVE'); str(12, 'fmt '); out.setUint32(16, 16, true);
+  out.setUint16(20, 1, true); out.setUint16(22, 1, true); out.setUint32(24, rate, true); out.setUint32(28, rate*2, true);
+  out.setUint16(32, 2, true); out.setUint16(34, 16, true); str(36, 'data'); out.setUint32(40, bytes, true);
+  const put = (src, o) => { for (let i = 0; i < n0; i++) out.setInt16(o + i*2, Math.max(-1, Math.min(1, src[i]))*32767, true); };
+  put(first, 44);
+  if (copies > 1){
+    put(cycle, 44 + one);
+    const u8 = new Uint8Array(ab), plain = u8.subarray(44 + one, 44 + 2*one);
+    for (let k = 2; k < copies; k++) u8.set(plain, 44 + k*one);
+  }
+  return ab;
+}
 async function renderLoop(key){
-  const M = MODES[key], cyc = M.dur*M.chords.length, L = cyc*Math.max(1, Math.round(220/cyc)), tail = 14, rate = 11025;   // everything sits below 4 kHz, so 11 kHz sampling loses nothing
+  // the shortest whole number of chord cycles of at least 200 s that divides an hour exactly
+  const M = MODES[key], cyc = M.dur*M.chords.length, tail = 14, rate = SND_RATE;
+  let L = cyc; while (L <= 3600 && (L < 200 || 3600 % L)) L += cyc;
+  if (L > 3600) L = cyc*Math.max(1, Math.round(240/cyc));
   const ctx = new OfflineAudioContext(1, Math.round(rate*(L + tail)), rate);
   const out = ctx.createGain(); out.gain.value = 1.0; out.connect(ctx.destination);
   const S = Soundscape(ctx, out, () => key, { start: 0, noiseStop: L });
@@ -1179,6 +1220,12 @@ if (EXPORT){
     frame(i, n){ render(i/n*Math.PI*2); gl.finish(); return cv.toDataURL('image/png'); },
     sweep(i, n){ render(-Math.PI/2 + Math.PI*i/(n - 1)); gl.finish(); return cv.toDataURL('image/png'); },
     atlas(){ return atlasCanvas.toDataURL('image/png'); },
+    async bellTest(pal, n){
+      const r = await renderLoop(pal), first = withBell(r.channels[0], await renderBell(n, r.rate), r.rate, n);
+      const bytes = new Uint8Array(encodeWav({ channels: [first], rate: r.rate })); let bin = '';
+      for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+      return { seconds: r.seconds, wav: btoa(bin) };
+    },
     async loop(pal){
       const t0 = performance.now(), r = await renderLoop(pal), bytes = new Uint8Array(encodeWav(r)); let bin = '';
       for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
@@ -1377,21 +1424,25 @@ if (reqFS && (document.fullscreenEnabled || document.webkitFullscreenEnabled)){
   });
 }
 /* ---------- live sound ----------
-   The drone and chimes are rendered once per hour into a seamless loop and played by an <audio> element, so they
-   keep going when you switch apps or lock the screen, the way a music app does. Two elements take turns: while the
-   page is open, a change of hour crossfades from one to the other, with Web Audio covering the seam. Web Audio also
-   rings the hour bell, which only sounds while the page is open. */
+   Each hour's drone and chimes are rendered once into a seamless loop and written out as a 60-minute track
+   whose first seconds carry the hour bell. The track plays from an <audio> element at the position that matches
+   the clock (minutes and seconds past the hour), so it wraps round, and the bell rings, exactly on the hour,
+   even with the page in the background or the screen locked. Two elements take turns: a change of light
+   crossfades between them while the page is open, and on the hour they swap to the track with the next count. */
 const soundBtn = document.getElementById('sound'), bellBtn = document.getElementById('bell');
 const XF = 6;   // crossfade, seconds
 // equal-power curves: two different hours are uncorrelated, so a straight-line crossfade would dip in the middle
 const EQ_IN = Float32Array.from({ length: 64 }, (_, i) => Math.sin(i/63*Math.PI/2)), EQ_OUT = EQ_IN.slice().reverse();
-const snd = { on: false, bell: true, els: [], cur: 0, playing: null, cache: new Map(), busy: false, finish: null,
-              ctx: null, out: null, S: null, timer: 0, lastToll: -1, silent: null };
+const snd = { on: false, bell: true, els: [], cur: 0, playing: null, next: null, busy: false, preparing: false, finish: null,
+              cycles: new Map(), bells: new Map(), tracks: new Map(), ctx: null, out: null, S: null, timer: 0, bTimer: 0, silent: null };
 try { snd.bell = localStorage.getItem('vitrail.bell') !== '0'; } catch (e) {}
 if (/[?&]debug\b/.test(location.search)) window.__snd = snd;
 const hourKeyNow = () => state.pal === 'now' ? (curPal(), blendCache.near) : state.pal;
 const HOUR_NAME = { matins: 'Matins', lauds: 'Lauds', sext: 'Sext', vespers: 'Vespers', compline: 'Compline' };
 const wait = ms => new Promise(r => setTimeout(r, ms));
+const hourPos = () => { const d = new Date(); return d.getMinutes()*60 + d.getSeconds() + d.getMilliseconds()/1000; };
+// strikes for the next top of the hour (1 to 12), or none with the bell off
+const nextCount = () => snd.bell ? (new Date(Date.now() + (3600 - hourPos())*1000 + 500).getHours() % 12 || 12) : 0;
 function soundSync(){
   soundBtn.setAttribute('aria-pressed', String(snd.on));
   bellBtn.hidden = !snd.on; bellBtn.setAttribute('aria-pressed', String(snd.bell));
@@ -1402,24 +1453,35 @@ function makeEl(){
   // a pause we did not ask for (a phone call, another app's music, the lock screen) turns the button off
   el.addEventListener('pause', () => {
     if (el._ours){ el._ours = false; return; }
-    if (snd.on && el === snd.els[snd.cur] && snd.playing){ snd.on = false; clearInterval(snd.timer); soundSync(); }
+    if (snd.on && el === snd.els[snd.cur] && snd.playing){ snd.on = false; clearInterval(snd.timer); clearTimeout(snd.bTimer); soundSync(); }
   });
   return el;
 }
-async function getLoop(key){
-  const hit = snd.cache.get(key);
-  if (hit){ snd.cache.delete(key); snd.cache.set(key, hit); return hit; }
-  const r = await renderLoop(key);
-  // iOS leaves a small hiccup each time an <audio> element jumps back to the start of a loop, so the
-  // three-to-four-minute loop is written out to about forty minutes and the jump happens rarely
-  const copies = Math.max(1, Math.round(2400/r.seconds));
-  const e = { key, data: r.channels[0], rate: r.rate, len: r.seconds*copies,
-              url: URL.createObjectURL(new Blob([encodeWav(r, copies)], { type: 'audio/wav' })) };
-  snd.cache.set(key, e);
-  for (const [k, v] of snd.cache){   // keep the two most recent hours
-    if (snd.cache.size <= 2) break;
-    if (v !== snd.playing){ URL.revokeObjectURL(v.url); snd.cache.delete(k); }
+function lru(map, max, keep){
+  for (const [k, v] of map){ if (map.size <= max) break; if (!keep(v)){ if (v.url) URL.revokeObjectURL(v.url); map.delete(k); } }
+}
+async function getCycle(key){
+  let c = snd.cycles.get(key);
+  if (!c){ const r = await renderLoop(key); c = { data: r.channels[0], rate: r.rate, len: r.seconds }; snd.cycles.set(key, c); }
+  else { snd.cycles.delete(key); snd.cycles.set(key, c); }
+  lru(snd.cycles, 3, v => snd.playing && v.data === snd.playing.data);
+  return c;
+}
+async function getTrack(key, count){
+  const id = key + ':' + count, hit = snd.tracks.get(id);
+  if (hit){ snd.tracks.delete(id); snd.tracks.set(id, hit); return hit; }
+  const c = await getCycle(key);
+  let first = c.data;
+  if (count > 0){
+    let b = snd.bells.get(count);
+    if (!b){ b = await renderBell(count, c.rate); snd.bells.set(count, b); }
+    first = withBell(c.data, b, c.rate, count);
   }
+  const copies = Math.max(1, Math.round(3600/c.len));
+  const e = { id, key, count, data: c.data, first, rate: c.rate, len: c.len*copies,
+              url: URL.createObjectURL(new Blob([trackWav(first, c.data, c.rate, copies)], { type: 'audio/wav' })) };
+  snd.tracks.set(id, e);
+  lru(snd.tracks, 3, v => v === snd.playing || v === snd.next);
   return e;
 }
 function mediaSession(state){
@@ -1439,17 +1501,18 @@ function bellCtx(){
   if (!snd.ctx){
     snd.ctx = new AC();
     snd.out = snd.ctx.createGain(); snd.out.connect(snd.ctx.destination);
-    const bells = snd.ctx.createGain(); bells.connect(snd.out);
+    const bells = snd.ctx.createGain(); bells.gain.value = BELL_GAIN; bells.connect(snd.out);
     snd.S = Soundscape(snd.ctx, bells, hourKeyNow, { noise: false });
   }
   if (snd.ctx.state !== 'running') snd.ctx.resume().catch(() => {});
   return snd.ctx;
 }
-// play a stretch of a rendered loop through Web Audio, starting at time t, with a gain envelope
+// play a stretch of a track through Web Audio, starting at time t, with a gain envelope
 function cover(e, pos, t, dur, env){
-  const ctx = snd.ctx, n = Math.round(dur*e.rate), L = e.data.length, b = ctx.createBuffer(1, n, e.rate), d = b.getChannelData(0);
-  let i0 = Math.round(pos*e.rate) % L;
-  for (let i = 0; i < n; i++){ d[i] = e.data[i0]; if (++i0 >= L) i0 = 0; }
+  const ctx = snd.ctx, n = Math.round(dur*e.rate), total = Math.round(e.len*e.rate), nf = e.first.length, nc = e.data.length;
+  const b = ctx.createBuffer(1, n, e.rate), d = b.getChannelData(0);
+  let i0 = ((Math.round(pos*e.rate) % total) + total) % total;
+  for (let i = 0; i < n; i++){ d[i] = i0 < nf ? e.first[i0] : e.data[i0 % nc]; if (++i0 >= total) i0 = 0; }
   const src = ctx.createBufferSource(); src.buffer = b;
   const g = ctx.createGain(); env(g.gain, t); src.connect(g); g.connect(snd.out);
   src.start(t); src.stop(t + dur);
@@ -1460,21 +1523,22 @@ function canPlay(el){
   return el.readyState >= 3 ? Promise.resolve() : Promise.race([
     new Promise(r => el.addEventListener('canplaythrough', r, { once: true })), wait(4000)]);
 }
-// move from whatever is playing to loop e at position pos (seconds)
-async function crossTo(e, pos){
+// move from whatever is playing to track e, at the position that matches the clock
+async function crossTo(e){
   const A = snd.els[snd.cur], from = !A.paused && snd.playing ? snd.playing : null;
+  snd.next = null;
   if (snd.ctx && snd.ctx.state !== 'running' && !document.hidden) await Promise.race([snd.ctx.resume(), wait(800)]).catch(() => {});
   if (!live()){
     // in the background, or no Web Audio: a plain cut on the same element
     hush(A); if (A.src !== e.url) A.src = e.url;
-    A.loop = true; await canPlay(A); A.currentTime = pos % e.len;
+    A.loop = true; await canPlay(A); A.currentTime = hourPos() % e.len;
     snd.playing = e; await A.play().catch(() => {});
     mediaSession('playing'); return;
   }
   const B = snd.els[1 - snd.cur], ctx = snd.ctx;
-  if (B.src !== e.url) B.src = e.url;
+  hush(B); if (B.src !== e.url) B.src = e.url;
   B.loop = true; await canPlay(B);
-  const lead = 0.15, t0 = ctx.currentTime + lead;
+  const lead = 0.15, t0 = ctx.currentTime + lead, pos = hourPos() + lead;
   if (from){
     const p0 = A.currentTime + lead;
     cover(from, p0, t0, XF + 0.2, (g, t) => { g.setValueAtTime(0, t); g.linearRampToValueAtTime(1, t + 0.08); g.setValueCurveAtTime(EQ_OUT, t + 0.09, XF - 0.09); });
@@ -1495,28 +1559,60 @@ async function crossTo(e, pos){
   await wait((lead + XF)*1000 - 120);
   await handOver();
 }
-// keep the element playing the loop for the hour we are in; serialised so taps and clock ticks do not overlap
+// keep the element playing the track for the light we are in; serialised so taps and clock ticks do not overlap
 async function ensure(){
   if (snd.busy) return; snd.busy = true;
   try {
     for (let guard = 0; guard < 6 && snd.on; guard++){
       const key = hourKeyNow(), A = snd.els[snd.cur];
       if (snd.playing && snd.playing.key === key && !A.paused) break;
-      if (!snd.cache.has(key)) showNote('Preparing the sound…', 3000);
-      const e = await getLoop(key);
+      if (!snd.cycles.has(key)) showNote('Preparing the sound…', 3000);
+      const e = await getTrack(key, nextCount());
       if (!snd.on) break;
       if (hourKeyNow() !== key) continue;
-      const resume = snd.playing === e && A.paused;
-      await crossTo(e, resume ? A.currentTime : 0);
+      await crossTo(e);
     }
   } catch (err){ console.error(err); showNote('The sound could not be prepared: ' + String(err).slice(0, 120), 4000); }
   finally { snd.busy = false; }
+  if (snd.on){ armBoundary(); prepareNext(); }
+}
+// load the other element with the track for the next top of the hour, when its count differs from what is playing
+async function prepareNext(){
+  if (!snd.on || !snd.playing || snd.busy || snd.preparing) return;
+  const cur = snd.playing, want = nextCount();
+  if (cur.count === want){ snd.next = null; return; }
+  if (snd.next && snd.next.key === cur.key && snd.next.count === want) return;
+  snd.preparing = true;
+  try {
+    const n = await getTrack(cur.key, want);
+    if (!snd.on || snd.playing !== cur || snd.busy) return;
+    const B = snd.els[1 - snd.cur];
+    hush(B); if (B.src !== n.url) B.src = n.url;
+    B.loop = true; await canPlay(B); B.currentTime = 0;
+    if (snd.playing === cur) snd.next = n;
+  } catch (err){ console.error(err); }
+  finally { snd.preparing = false; }
+}
+function armBoundary(){
+  clearTimeout(snd.bTimer);
+  if (snd.on) snd.bTimer = setTimeout(atBoundary, Math.max(0, (3600 - hourPos())*1000 + 15));
+}
+// on the hour: both tracks are at the same place, so swapping to the one with the right count is seamless
+// apart from the jump back to the start, which the bell covers
+function atBoundary(){
+  const n = snd.next, A = snd.els[snd.cur], B = snd.els[1 - snd.cur], p = hourPos();
+  if (snd.on && n && snd.playing && n.key === snd.playing.key && !snd.busy && B.src === n.url && p < 30){
+    hush(A); B.currentTime = p; B.play().catch(() => {});
+    snd.cur = 1 - snd.cur; snd.playing = n; snd.next = null; mediaSession('playing');
+  }
+  armBoundary();
+  setTimeout(prepareNext, 75000);   // once the bell has died away
 }
 function soundStart(){
   try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) {}
   if (!snd.els.length){
     snd.els = [makeEl(), makeEl()];
-    snd.silent = URL.createObjectURL(new Blob([encodeWav({ channels: [new Float32Array(4410)], rate: 22050 })], { type: 'audio/wav' }));
+    snd.silent = URL.createObjectURL(new Blob([encodeWav({ channels: [new Float32Array(800)], rate: SND_RATE })], { type: 'audio/wav' }));
   }
   // browsers only let an element play after a tap; start both here (silently if nothing is ready yet)
   snd.els.forEach((el, i) => {
@@ -1532,15 +1628,11 @@ function soundStart(){
     const k = hourKeyNow();
     if (k !== snd.seen){ snd.seen = k; snd.seenAt = Date.now(); }
     if (!snd.busy && !dayDrag && Date.now() - snd.seenAt > 1500 && (!snd.playing || snd.playing.key !== k)) ensure();
-    const d = new Date();
-    if (snd.bell && snd.ctx && d.getMinutes() === 0 && d.getSeconds() < 10 && d.getHours() !== snd.lastToll){
-      snd.lastToll = d.getHours(); bellCtx(); snd.S.toll(d.getHours() % 12 || 12, snd.ctx.currentTime + 0.3);
-    }
   }, 1000);
   ensure();
 }
 function soundStop(){
-  snd.on = false; soundSync(); clearInterval(snd.timer);
+  snd.on = false; soundSync(); clearInterval(snd.timer); clearTimeout(snd.bTimer);
   if (snd.finish) snd.finish();
   const A = snd.els[snd.cur];
   if (A && !A.paused && snd.playing && live()){
@@ -1559,7 +1651,11 @@ soundBtn.addEventListener('click', () => {
 bellBtn.addEventListener('click', () => {
   snd.bell = !snd.bell; soundSync();
   try { localStorage.setItem('vitrail.bell', snd.bell ? '1' : '0'); } catch (e) {}
-  if (snd.bell && snd.on && bellCtx()) snd.S.toll(1, snd.ctx.currentTime + 0.2);
+  if (snd.bell){
+    if (snd.on && bellCtx()) snd.S.toll(1, snd.ctx.currentTime + 0.2);   // one strike, so you know what to listen for
+    showNote('The bell will toll on the hour, once for each hour', 3000);
+  } else showNote('No bell on the hour', 2500);
+  prepareNext();
 });
 document.addEventListener('visibilitychange', () => {
   if (document.hidden){
@@ -1568,6 +1664,7 @@ document.addEventListener('visibilitychange', () => {
   } else if (snd.on){
     bellCtx();
     if (!snd.busy && (!snd.playing || snd.playing.key !== hourKeyNow())) ensure();
+    else { armBoundary(); prepareNext(); }
   }
 });
 // a remembered "sound on" waits for the first tap, since browsers only start audio after one

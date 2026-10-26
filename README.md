@@ -26,18 +26,18 @@ Tap **Sound** to hear the nave. Everything is synthesized in the browser with th
 
 - **Drone**: an organ-like drone whose mode and chords follow the hour. It is Dorian before dawn, Mixolydian at sunrise, open fifths at noon, a warm major at sunset and a low Aeolian at night.
 - **Chimes**: sparse glass chimes, more often by day and rarer at night.
-- **Hour bell**: a distant bell tolls the hour, from one to twelve strikes. It has its own toggle.
+- **Hour bell**: a distant bell tolls the hour, from one to twelve strikes, and the drone dips a little while it speaks. It has its own toggle, and turning it on plays a single strike so you know what to listen for.
 - **Reverb**: a generated stone-hall reverb with a six-second tail.
 
 The mix is centred and low-passed, so nothing is shrill and nothing jumps between the left and right speakers.
 
 ### Listening in the background
 
-The drone and chimes keep playing when you switch to another app or lock the screen, like a music app, and they show up in the lock-screen media controls. To make that possible, the page renders the current hour's soundscape into a seamless loop of three to four minutes (this takes a few seconds the first time), writes it out end to end into a track of about forty minutes, and plays that through an ordinary `<audio>` element. iOS leaves a tiny hiccup each time a looping element jumps back to the start, so a long track keeps that to once every forty minutes. While the page is open, a change of hour crossfades into the next hour's loop.
+The sound keeps playing when you switch to another app or lock the screen, like a music app, and it shows up in the lock-screen media controls. To make that possible, the page renders the current hour's drone and chimes into a seamless loop of four to six minutes (this takes a few seconds the first time), writes it out into a 60-minute track whose first seconds carry the hour bell, and plays that through an ordinary `<audio>` element.
 
-Two things only happen while the page is on screen: the hour bell, and following the clock into the next hour. When you come back, the music catches up.
+The track is started at the position that matches the clock, so if it is 21:40 it starts 40 minutes in. It then comes back round to its beginning, and rings the bell, exactly on the hour, with or without the page on screen. Near each hour the page prepares the next hour's track (with one more strike) and swaps to it on the hour. While the page is open, a change of light crossfades into the next hour's music.
 
-On iPhone and iPad, Safari is the most reliable for background playback. Some other browsers on iOS stop all sound when they go to the background.
+On iPhone and iPad, Safari is the most reliable for background playback. Some other browsers on iOS stop all sound when they go to the background, and a page added to the home screen may not get to swap tracks while it is in the background, in which case the bell repeats the previous count until you open it again.
 
 ## Controls
 
